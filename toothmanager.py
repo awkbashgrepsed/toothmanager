@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import traceback
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -9,7 +10,12 @@ except ImportError:
     BleakScanner = None
 
 try:
-    from winrt.windows.devices.radios import Radio, RadioAccessStatus, RadioKind, RadioState
+    from winrt.windows.devices.radios import (
+        Radio,
+        RadioAccessStatus,
+        RadioKind,
+        RadioState,
+    )
 except ImportError:
     Radio = None
     RadioAccessStatus = None
@@ -93,7 +99,9 @@ class BluetoothManager(tk.Tk):
     def refresh_radio_state(self):
         if Radio is None:
             self.radio_button.config(state="disabled", text="Unavailable")
-            self.radio_status.config(text="Install winrt-Windows.Devices.Radios")
+            self.radio_status.config(text="Install WinRT radio support")
+            print("[Bluetooth] WinRT Radio API is unavailable.")
+            print("[Bluetooth] Install dependencies with: python -m pip install -r requirements.txt")
             return
 
         threading.Thread(target=self._radio_state_worker, daemon=True).start()
@@ -101,19 +109,35 @@ class BluetoothManager(tk.Tk):
     def _radio_state_worker(self):
         try:
             radios = asyncio.run(Radio.get_radios_async())
+
+            print(f"[Bluetooth] Windows reported {len(radios)} radio(s).")
+            for radio in radios:
+                print(
+                    "[Bluetooth] Radio:"
+                    f" name={radio.name!r}"
+                    f" kind={radio.kind}"
+                    f" state={radio.state}"
+                )
+
             bluetooth = next(
                 (radio for radio in radios if radio.kind == RadioKind.BLUETOOTH),
                 None,
             )
+
+            if bluetooth is None:
+                print("[Bluetooth] No Bluetooth radio was returned by Windows.")
+
             self.after(0, self._radio_state_finished, bluetooth, None)
         except Exception as exc:
+            print("[Bluetooth] Failed to query Windows radio state:")
+            traceback.print_exc()
             self.after(0, self._radio_state_finished, None, exc)
 
     def _radio_state_finished(self, radio, error):
         if error:
             self.bluetooth_radio = None
             self.radio_button.config(state="disabled", text="Unavailable")
-            self.radio_status.config(text=str(error))
+            self.radio_status.config(text="See terminal for error")
             return
 
         self.bluetooth_radio = radio
@@ -139,39 +163,79 @@ class BluetoothManager(tk.Tk):
             self.radio_status.config(text="Disabled by hardware or Windows")
         else:
             self.radio_button.config(state="disabled", text="Unknown")
-            self.radio_status.config(text="Unknown radio state")
+            self.radio_status.config(text=f"Unknown state: {state}")
 
     def toggle_bluetooth(self):
         if self.bluetooth_radio is None:
+            print("[Bluetooth] Cannot toggle: no Bluetooth radio is available.")
             return
+
+        print(
+            "[Bluetooth] Toggle requested."
+            f" Current state={self.bluetooth_radio.state}"
+        )
 
         self.radio_button.config(state="disabled", text="Changing...")
         threading.Thread(target=self._toggle_radio_worker, daemon=True).start()
 
     def _toggle_radio_worker(self):
         try:
+            print("[Bluetooth] Requesting permission to change radio state...")
             access = asyncio.run(Radio.request_access_async())
+            print(f"[Bluetooth] request_access_async() returned: {access}")
 
             if access != RadioAccessStatus.ALLOWED:
-                raise RuntimeError(f"Windows denied Bluetooth radio control: {access}")
+                raise RuntimeError(
+                    f"Windows denied Bluetooth radio control: {access}"
+                )
 
+            current_state = self.bluetooth_radio.state
             target = (
                 RadioState.OFF
-                if self.bluetooth_radio.state == RadioState.ON
+                if current_state == RadioState.ON
                 else RadioState.ON
             )
+
+            print(
+                "[Bluetooth] Calling set_state_async()."
+                f" Current={current_state}, target={target}"
+            )
+
             status = asyncio.run(self.bluetooth_radio.set_state_async(target))
+            print(f"[Bluetooth] set_state_async() returned: {status}")
 
             if status != RadioAccessStatus.ALLOWED:
-                raise RuntimeError(f"Windows denied the requested radio change: {status}")
+                raise RuntimeError(
+                    f"Windows denied the requested radio change: {status}"
+                )
 
+            print("[Bluetooth] Windows accepted the radio state change.")
             self.after(250, self.refresh_radio_state)
+
         except Exception as exc:
+            print("[Bluetooth] FAILED to change radio state:")
+            traceback.print_exc()
             self.after(0, self._radio_toggle_failed, exc)
 
     def _radio_toggle_failed(self, error):
-        self._update_radio_ui(self.bluetooth_radio)
-        messagebox.showerror("Bluetooth", str(error))
+        if self.bluetooth_radio is not None:
+            try:
+                print(
+                    "[Bluetooth] State after failure:"
+                    f" {self.bluetooth_radio.state}"
+                )
+                self._update_radio_ui(self.bluetooth_radio)
+            except Exception:
+                print("[Bluetooth] Could not read radio state after failure:")
+                traceback.print_exc()
+
+        self.radio_status.config(text="Operation failed; see terminal")
+
+        messagebox.showerror(
+            "Bluetooth",
+            "Could not change the Bluetooth state.\n\n"
+            "The full Windows error has been printed to the terminal.",
+        )
 
     def start_scan(self):
         if self.scanning:
@@ -196,6 +260,8 @@ class BluetoothManager(tk.Tk):
             devices = asyncio.run(BleakScanner.discover(timeout=5))
             self.after(0, self._scan_finished, devices, None)
         except Exception as exc:
+            print("[Bluetooth] Scan failed:")
+            traceback.print_exc()
             self.after(0, self._scan_finished, [], exc)
 
     def _scan_finished(self, devices, error):
@@ -203,8 +269,11 @@ class BluetoothManager(tk.Tk):
         self.scan_button.config(state="normal")
 
         if error:
-            self.status.config(text="Scan failed")
-            messagebox.showerror("Bluetooth scan failed", str(error))
+            self.status.config(text="Scan failed; see terminal")
+            messagebox.showerror(
+                "Bluetooth scan failed",
+                "The scan failed. The full error is in the terminal.",
+            )
             return
 
         self.devices = devices
@@ -214,6 +283,7 @@ class BluetoothManager(tk.Tk):
             self.device_list.insert("", "end", values=(name, device.address))
 
         self.status.config(text=f"Found {len(devices)} device(s)")
+        print(f"[Bluetooth] Scan found {len(devices)} device(s).")
 
     def _selected_device(self):
         selection = self.device_list.selection()
