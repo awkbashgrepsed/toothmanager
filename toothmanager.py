@@ -84,17 +84,8 @@ class BluetoothManager(tk.Tk):
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=10, pady=(0, 10))
 
-        tk.Button(
-            bottom,
-            text="Pair / Connect",
-            command=self.pair_or_connect,
-        ).pack(side="left")
-
-        tk.Button(
-            bottom,
-            text="Disconnect",
-            command=self.disconnect,
-        ).pack(side="left", padx=6)
+        tk.Button(bottom, text="Pair / Connect", command=self.pair_or_connect).pack(side="left")
+        tk.Button(bottom, text="Disconnect", command=self.disconnect).pack(side="left", padx=6)
 
     def refresh_radio_state(self):
         if Radio is None:
@@ -106,9 +97,17 @@ class BluetoothManager(tk.Tk):
 
         threading.Thread(target=self._radio_state_worker, daemon=True).start()
 
+    @staticmethod
+    def _winrt_await(operation):
+        """Wait for a WinRT IAsyncOperation without passing it to asyncio.run()."""
+        return operation.get()
+
     def _radio_state_worker(self):
         try:
-            radios = asyncio.run(Radio.get_radios_async())
+            # WinRT's get_radios_async() returns an IAsyncOperation, not a
+            # native Python coroutine. Calling asyncio.run() on it raises
+            # ValueError on Python 3.13, so use the WinRT operation's get().
+            radios = self._winrt_await(Radio.get_radios_async())
 
             print(f"[Bluetooth] Windows reported {len(radios)} radio(s).")
             for radio in radios:
@@ -181,33 +180,25 @@ class BluetoothManager(tk.Tk):
     def _toggle_radio_worker(self):
         try:
             print("[Bluetooth] Requesting permission to change radio state...")
-            access = asyncio.run(Radio.request_access_async())
+            access = self._winrt_await(Radio.request_access_async())
             print(f"[Bluetooth] request_access_async() returned: {access}")
 
             if access != RadioAccessStatus.ALLOWED:
-                raise RuntimeError(
-                    f"Windows denied Bluetooth radio control: {access}"
-                )
+                raise RuntimeError(f"Windows denied Bluetooth radio control: {access}")
 
             current_state = self.bluetooth_radio.state
-            target = (
-                RadioState.OFF
-                if current_state == RadioState.ON
-                else RadioState.ON
-            )
+            target = RadioState.OFF if current_state == RadioState.ON else RadioState.ON
 
             print(
                 "[Bluetooth] Calling set_state_async()."
                 f" Current={current_state}, target={target}"
             )
 
-            status = asyncio.run(self.bluetooth_radio.set_state_async(target))
+            status = self._winrt_await(self.bluetooth_radio.set_state_async(target))
             print(f"[Bluetooth] set_state_async() returned: {status}")
 
             if status != RadioAccessStatus.ALLOWED:
-                raise RuntimeError(
-                    f"Windows denied the requested radio change: {status}"
-                )
+                raise RuntimeError(f"Windows denied the requested radio change: {status}")
 
             print("[Bluetooth] Windows accepted the radio state change.")
             self.after(250, self.refresh_radio_state)
@@ -220,17 +211,13 @@ class BluetoothManager(tk.Tk):
     def _radio_toggle_failed(self, error):
         if self.bluetooth_radio is not None:
             try:
-                print(
-                    "[Bluetooth] State after failure:"
-                    f" {self.bluetooth_radio.state}"
-                )
+                print("[Bluetooth] State after failure:" f" {self.bluetooth_radio.state}")
                 self._update_radio_ui(self.bluetooth_radio)
             except Exception:
                 print("[Bluetooth] Could not read radio state after failure:")
                 traceback.print_exc()
 
         self.radio_status.config(text="Operation failed; see terminal")
-
         messagebox.showerror(
             "Bluetooth",
             "Could not change the Bluetooth state.\n\n"
@@ -242,17 +229,13 @@ class BluetoothManager(tk.Tk):
             return
 
         if BleakScanner is None:
-            messagebox.showerror(
-                "Missing dependency",
-                "Bleak is not installed. Run: python -m pip install bleak",
-            )
+            messagebox.showerror("Missing dependency", "Bleak is not installed. Run: python -m pip install bleak")
             return
 
         self.scanning = True
         self.scan_button.config(state="disabled")
         self.status.config(text="Scanning...")
         self.device_list.delete(*self.device_list.get_children())
-
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
@@ -270,14 +253,10 @@ class BluetoothManager(tk.Tk):
 
         if error:
             self.status.config(text="Scan failed; see terminal")
-            messagebox.showerror(
-                "Bluetooth scan failed",
-                "The scan failed. The full error is in the terminal.",
-            )
+            messagebox.showerror("Bluetooth scan failed", "The scan failed. The full error is in the terminal.")
             return
 
         self.devices = devices
-
         for device in devices:
             name = device.name or "Unknown device"
             self.device_list.insert("", "end", values=(name, device.address))
@@ -290,7 +269,6 @@ class BluetoothManager(tk.Tk):
         if not selection:
             messagebox.showinfo("ToothManager", "Select a Bluetooth device first.")
             return None
-
         index = self.device_list.index(selection[0])
         return self.devices[index]
 
@@ -298,21 +276,13 @@ class BluetoothManager(tk.Tk):
         device = self._selected_device()
         if device is None:
             return
-
-        messagebox.showinfo(
-            "Not implemented yet",
-            "Device discovery is working first. Pairing and connecting come next.",
-        )
+        messagebox.showinfo("Not implemented yet", "Device discovery is working first. Pairing and connecting come next.")
 
     def disconnect(self):
         device = self._selected_device()
         if device is None:
             return
-
-        messagebox.showinfo(
-            "Not implemented yet",
-            "Disconnect support will be added after device discovery.",
-        )
+        messagebox.showinfo("Not implemented yet", "Disconnect support will be added after device discovery.")
 
 
 if __name__ == "__main__":
