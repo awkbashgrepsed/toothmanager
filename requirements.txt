@@ -1,1 +1,2 @@
 bleak>=1.1,<2
+winrt-Windows.Devices.Radios>=2.0
