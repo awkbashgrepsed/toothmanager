@@ -8,20 +8,46 @@ try:
 except ImportError:
     BleakScanner = None
 
+try:
+    from winrt.windows.devices.radios import Radio, RadioAccessStatus, RadioKind, RadioState
+except ImportError:
+    Radio = None
+    RadioAccessStatus = None
+    RadioKind = None
+    RadioState = None
+
 
 class BluetoothManager(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("ToothManager")
-        self.geometry("560x400")
-        self.minsize(480, 320)
+        self.geometry("560x440")
+        self.minsize(480, 360)
 
         self.devices = []
         self.scanning = False
+        self.bluetooth_radio = None
 
         self._build_ui()
+        self.after(100, self.refresh_radio_state)
 
     def _build_ui(self):
+        radio_frame = tk.Frame(self)
+        radio_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        tk.Label(radio_frame, text="Bluetooth:").pack(side="left")
+
+        self.radio_button = tk.Button(
+            radio_frame,
+            text="Checking...",
+            width=12,
+            command=self.toggle_bluetooth,
+        )
+        self.radio_button.pack(side="left", padx=8)
+
+        self.radio_status = tk.Label(radio_frame, text="Checking Bluetooth radio...")
+        self.radio_status.pack(side="left")
+
         top = tk.Frame(self)
         top.pack(fill="x", padx=10, pady=10)
 
@@ -63,6 +89,89 @@ class BluetoothManager(tk.Tk):
             text="Disconnect",
             command=self.disconnect,
         ).pack(side="left", padx=6)
+
+    def refresh_radio_state(self):
+        if Radio is None:
+            self.radio_button.config(state="disabled", text="Unavailable")
+            self.radio_status.config(text="Install winrt-Windows.Devices.Radios")
+            return
+
+        threading.Thread(target=self._radio_state_worker, daemon=True).start()
+
+    def _radio_state_worker(self):
+        try:
+            radios = asyncio.run(Radio.get_radios_async())
+            bluetooth = next(
+                (radio for radio in radios if radio.kind == RadioKind.BLUETOOTH),
+                None,
+            )
+            self.after(0, self._radio_state_finished, bluetooth, None)
+        except Exception as exc:
+            self.after(0, self._radio_state_finished, None, exc)
+
+    def _radio_state_finished(self, radio, error):
+        if error:
+            self.bluetooth_radio = None
+            self.radio_button.config(state="disabled", text="Unavailable")
+            self.radio_status.config(text=str(error))
+            return
+
+        self.bluetooth_radio = radio
+
+        if radio is None:
+            self.radio_button.config(state="disabled", text="Not found")
+            self.radio_status.config(text="No Bluetooth radio detected")
+            return
+
+        self._update_radio_ui(radio)
+
+    def _update_radio_ui(self, radio):
+        state = radio.state
+
+        if state == RadioState.ON:
+            self.radio_button.config(state="normal", text="Turn Off")
+            self.radio_status.config(text="On")
+        elif state == RadioState.OFF:
+            self.radio_button.config(state="normal", text="Turn On")
+            self.radio_status.config(text="Off")
+        elif state == RadioState.DISABLED:
+            self.radio_button.config(state="disabled", text="Disabled")
+            self.radio_status.config(text="Disabled by hardware or Windows")
+        else:
+            self.radio_button.config(state="disabled", text="Unknown")
+            self.radio_status.config(text="Unknown radio state")
+
+    def toggle_bluetooth(self):
+        if self.bluetooth_radio is None:
+            return
+
+        self.radio_button.config(state="disabled", text="Changing...")
+        threading.Thread(target=self._toggle_radio_worker, daemon=True).start()
+
+    def _toggle_radio_worker(self):
+        try:
+            access = asyncio.run(Radio.request_access_async())
+
+            if access != RadioAccessStatus.ALLOWED:
+                raise RuntimeError(f"Windows denied Bluetooth radio control: {access}")
+
+            target = (
+                RadioState.OFF
+                if self.bluetooth_radio.state == RadioState.ON
+                else RadioState.ON
+            )
+            status = asyncio.run(self.bluetooth_radio.set_state_async(target))
+
+            if status != RadioAccessStatus.ALLOWED:
+                raise RuntimeError(f"Windows denied the requested radio change: {status}")
+
+            self.after(250, self.refresh_radio_state)
+        except Exception as exc:
+            self.after(0, self._radio_toggle_failed, exc)
+
+    def _radio_toggle_failed(self, error):
+        self._update_radio_ui(self.bluetooth_radio)
+        messagebox.showerror("Bluetooth", str(error))
 
     def start_scan(self):
         if self.scanning:
